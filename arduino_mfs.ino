@@ -37,6 +37,16 @@
         bikin layar TM1637 jadi redup/berkedip (dugaan drop tegangan
         5V pas komponen lain aktif bersamaan) -- matikan RGB LED lalu
         lihat apakah layarnya jadi lebih stabil/terang.
+      - TAHAN SW2 (>= 0.7 detik) -> jalankan TES KECERAHAN DISPLAY.
+        Layar akan bergantian menampilkan "----" (1 segmen/digit,
+        arus paling kecil), "1111" (2 segmen/digit), lalu "8888"
+        (7 segmen/digit, arus paling besar), masing-masing selama
+        4 detik. Tes ini juga otomatis jalan sekali waktu board baru
+        nyala/di-reset. Gunanya: ukur tegangan VCC-GND di modul
+        TM1637 pakai multimeter di setiap pola -- kalau tegangannya
+        kelihatan turun pas pola "8888" dibanding "----", itu artinya
+        penyebab redupnya adalah drop tegangan/arus di jalur kabel
+        VCC-GND ke modul (bukan software, bukan RGB LED).
       - Buzzer HANYA bunyi saat IR Receiver berhasil menerima kode
         dari remote (bukan bunyi berkala lagi).
 
@@ -50,6 +60,8 @@
     - Tap SW2 untuk pindah antara tampilan suhu dan tampilan kode IR.
     - Tap SW1 untuk ganti format kode IR antara HEX dan DESIMAL.
     - Tahan SW1 sebentar (>= 0.7 detik) untuk mati/nyalakan RGB LED.
+    - Tahan SW2 sebentar (>= 0.7 detik) untuk mengulang tes kecerahan
+      display (pola ---- / 1111 / 8888) kapan saja tanpa perlu reset.
     - Arahkan remote IR apapun ke Receiver -> buzzer akan bunyi
       pendek dan kode IR-nya muncul di layar (kalau sedang di mode
       KODE IR).
@@ -127,8 +139,38 @@ const unsigned long LONG_PRESS_MS = 700;
 unsigned long tSW1PressStart = 0;
 bool sw1LongPressTriggered = false;
 
+unsigned long tSW2PressStart = 0;
+bool sw2LongPressTriggered = false;
+
 uint32_t lastIRCode = 0;
 bool hasIRCode = false;
+
+// ---------- Tes kecerahan display (diagnosa drop tegangan) ----------
+// Menampilkan pola dengan jumlah segmen berbeda-beda secara berurutan,
+// supaya bisa dibandingkan kecerahannya / diukur tegangannya dengan
+// multimeter di tiap pola. Fungsi ini BLOCKING (pakai delay), sengaja,
+// karena memang dipakai sesaat saja (bukan bagian dari loop utama).
+void runBrightnessDiagnostic() {
+  Serial.println(F("=== TES KECERAHAN DISPLAY ==="));
+  Serial.println(F("Ukur tegangan VCC-GND di modul TM1637 pas tiap pola tampil."));
+
+  display.setBrightness(7);
+
+  uint8_t dash[] = { 0x40, 0x40, 0x40, 0x40 };
+  display.setSegments(dash);
+  Serial.println(F("Pola 1/3: \"----\" (1 segmen/digit, arus paling kecil) -> ukur sekarang"));
+  delay(4000);
+
+  display.showNumberDec(1111);
+  Serial.println(F("Pola 2/3: \"1111\" (2 segmen/digit) -> ukur sekarang"));
+  delay(4000);
+
+  display.showNumberDec(8888);
+  Serial.println(F("Pola 3/3: \"8888\" (7 segmen/digit, arus paling besar) -> ukur sekarang"));
+  delay(4000);
+
+  Serial.println(F("=== Tes selesai, kembali ke tampilan normal ==="));
+}
 
 void setup() {
   Serial.begin(9600);
@@ -156,6 +198,10 @@ void setup() {
   delay(200);
   digitalWrite(PIN_LED1, LOW);
   digitalWrite(PIN_LED2, LOW);
+
+  // Jalankan tes kecerahan display sekali di awal (bisa diulang kapan
+  // saja nanti dengan tahan SW2 >= 0.7 detik)
+  runBrightnessDiagnostic();
 }
 
 void loop() {
@@ -197,11 +243,25 @@ void loop() {
     lastSW2 = sw2;
     Serial.print(F("[TOMBOL] SW2 (D3): "));
     Serial.println(sw2 == LOW ? F("DITEKAN") : F("dilepas"));
-    if (sw2 == LOW) { // aksi dijalankan saat SW2 DITEKAN
-      displayMode = !displayMode;
-      Serial.print(F("[MODE] Tampilan sekarang: "));
-      Serial.println(displayMode == 0 ? F("SUHU") : F("KODE IR"));
+
+    if (sw2 == LOW) {
+      // Mulai hitung durasi tekan, untuk membedakan tap vs tahan
+      tSW2PressStart = now;
+      sw2LongPressTriggered = false;
+    } else {
+      // Dilepas: kalau belum sempat jadi long-press, berarti ini TAP biasa
+      if (!sw2LongPressTriggered) {
+        displayMode = !displayMode;
+        Serial.print(F("[MODE] Tampilan sekarang: "));
+        Serial.println(displayMode == 0 ? F("SUHU") : F("KODE IR"));
+      }
     }
+  }
+
+  // Deteksi tekan-tahan SW2 (dicek tiap loop selama tombol masih ditekan)
+  if (sw2 == LOW && !sw2LongPressTriggered && (now - tSW2PressStart) >= LONG_PRESS_MS) {
+    sw2LongPressTriggered = true;
+    runBrightnessDiagnostic(); // blocking ~12 detik, sengaja karena cuma dipicu manual
   }
 
   // ---------- 2. LED1 & LED2 berkedip bergantian (heartbeat) ----------
