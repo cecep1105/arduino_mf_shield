@@ -1,0 +1,109 @@
+/*
+  ATmega8A (MiniCore) - IR Transmitter dengan SAKLAR, clock Internal 1MHz + Timer2
+  ==================================================================================
+  Dikembangkan dari atmega8a_ir_transmitter_1mhz_timer2.ino. Bedanya: kode NEC
+  TIDAK lagi dikirim otomatis tiap 3 detik, melainkan sekali setiap saklar
+  ditekan.
+
+  Rangkaian tambahan (lihat skema svg):
+    - Saklar push-button dipasang antara D2 (PD2, pin fisik 4) dan GND.
+    - Pull-up dilakukan secara internal lewat pinMode(INPUT_PULLUP), jadi
+      TIDAK perlu resistor eksternal -- cukup 2 kabel + saklar ke GND.
+    - Sisanya (driver transistor + LED IR di D11/PB3/OC2, kristal tidak
+      dipakai, dsb) SAMA seperti versi sebelumnya.
+
+  Cara kerja saklar:
+    - Idle (tidak ditekan): pin D2 dibaca HIGH (ditarik ke VCC oleh pull-up
+      internal).
+    - Ditekan: saklar menghubungkan D2 ke GND, jadi terbaca LOW.
+    - Kode NEC dikirim SEKALI setiap kali ada transisi HIGH->LOW yang sudah
+      "stabil" selama >50ms (debounce sederhana pakai millis(), supaya
+      dengusan/bouncing kontak mekanik saklar tidak dianggap banyak
+      penekanan).
+    - Menahan saklar tetap ditekan TIDAK mengirim ulang; harus dilepas dulu
+      baru bisa mengirim lagi.
+
+  Setelan board & langkah upload: SAMA seperti versi sebelumnya
+  (MiniCore > ATmega8, Clock: Internal 1 MHz, Burn Bootloader dulu di chip
+  baru, lalu Upload Using Programmer).
+*/
+
+// ---- Driver IR (Timer2 hardware, WAJIB di D11/PB3/OC2) ----
+#define IR_DDR   DDRB
+#define IR_PORT  PORTB
+#define IR_BIT   PB3
+
+static inline void carrierOn() {
+  TCNT2 = 0;
+  TCCR2 |= (1 << COM20);
+}
+
+static inline void carrierOff() {
+  TCCR2 &= ~(1 << COM20);
+  IR_PORT &= ~(1 << IR_BIT);
+}
+
+void mark(uint16_t us) {
+  carrierOn();
+  delayMicroseconds(us);
+  carrierOff();
+}
+
+void space(uint16_t us) {
+  IR_PORT &= ~(1 << IR_BIT);
+  delayMicroseconds(us);
+}
+
+void sendNEC(uint32_t data, uint8_t nbits) {
+  mark(9000);
+  space(4500);
+  for (int8_t i = nbits - 1; i >= 0; i--) {
+    mark(560);
+    if (data & ((uint32_t)1 << i)) {
+      space(1690);  // bit '1'
+    } else {
+      space(560);   // bit '0'
+    }
+  }
+  mark(560);  // penutup
+  carrierOff();
+}
+
+// ---- Saklar ----
+const uint8_t BUTTON_PIN = 2;           // D2 / PD2 (pin fisik 4)
+const unsigned long DEBOUNCE_MS = 50;
+
+int lastReading   = HIGH;   // bacaan mentah terakhir
+int stableState   = HIGH;   // status setelah lolos debounce
+unsigned long lastChangeTime = 0;
+
+void setup() {
+  IR_DDR |= (1 << IR_BIT);
+  IR_PORT &= ~(1 << IR_BIT);
+
+  TCCR2 = (1 << WGM21) | (1 << CS20);  // CTC, prescaler 1x, OC2 masih terputus
+  OCR2 = 12;                            // ~38.46kHz dari clock 1MHz
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);    // saklar ke GND, tanpa resistor eksternal
+}
+
+void loop() {
+  int reading = digitalRead(BUTTON_PIN);
+
+  // Kalau bacaan berubah dari sebelumnya, catat waktunya dan tunggu stabil.
+  if (reading != lastReading) {
+    lastChangeTime = millis();
+  }
+
+  if ((millis() - lastChangeTime) > DEBOUNCE_MS && reading != stableState) {
+    stableState = reading;
+
+    if (stableState == LOW) {
+      // Baru saja ditekan (dan sudah stabil selama DEBOUNCE_MS) -> kirim sekali.
+      // Ganti 0xE0E040BF dengan kode hasil capture remote TV Anda sendiri.
+      sendNEC(0xE0E040BF, 32);
+    }
+  }
+
+  lastReading = reading;
+}
